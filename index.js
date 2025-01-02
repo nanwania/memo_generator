@@ -439,7 +439,7 @@ app.post(
          - Explain the current unattended area or problems companies face. Mention any tailwinds making this space more attractive at this moment. Keep the "why now" reasons to 2-3 points.
          - Provide a detailed market sizing calculation using as much data as given in the context. Include:
            - Total Addressable Market (TAM) and the CAGR or expected growth with reason, making sure you detail to what market you are reffering to 
-           - For each number included (like market size in billions or growth rate), provide details. Also provide hyperlink to the URL of sources if available 
+           - For each number included (like market size in billions or growth rate), provide details. Also always provide hyperlink to the URL of sources if available 
 
       3. <h2>Competitive Landscape</h2>
          - Analyze competitors, providing descriptions of what they do, any traction, super key to provide total funding when data is available - If not available do not make it up stick with context. 

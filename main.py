@@ -25,7 +25,7 @@ def run_analysis(market_opportunity, trace_id):
         expected_output="""A detailed market analysis report including:
         1. Total market size with CAGR
         2. Total number of potential customers
-        All with supporting data and sources.""",
+        All with supporting data and sources links.""",
         agent=market_analyst,
         async_execution=False
     )
