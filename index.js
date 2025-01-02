@@ -19,6 +19,27 @@ const crypto = require("crypto");
 const Portkey = require("portkey-ai").default;
 const portkey = new Portkey({ apiKey: process.env.PORTKEY_API_KEY });
 
+// Helper function to check content moderation
+async function checkModeration(text) {
+  const openai = new OpenAI({
+    baseURL: PORTKEY_GATEWAY_URL,
+    defaultHeaders: createHeaders({
+      provider: "openai",
+      apiKey: process.env.PORTKEY_API_KEY,
+    }),
+    apiKey: process.env.OPENAI_API_KEY,
+  });
+
+  try {
+    const moderation = await openai.moderations.create({ input: text });
+    return moderation.results[0].flagged;
+  } catch (error) {
+    console.error("Error in content moderation:", error);
+    return true; // Fail safe - treat as flagged if error occurs
+  }
+}
+
+
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -284,6 +305,22 @@ app.post(
     console.log(`Starting memo generation process with trace ID: ${traceId}`);
 
     try {
+      // Check for moderation before processing
+      if (req.body.url) {
+        const urlContent = await extractContentFromUrl(req.body.url);
+        if (await checkModeration(urlContent)) {
+          return res.status(400).json({ error: "Content from URL has been flagged as inappropriate" });
+        }
+      }
+
+      if (req.body.linkedInUrls) {
+        for (const url of req.body.linkedInUrls) {
+          const profileData = await getLinkedInProfile(url);
+          if (profileData && profileData.summary && await checkModeration(profileData.summary)) {
+            return res.status(400).json({ error: "LinkedIn profile content has been flagged as inappropriate" });
+          }
+        }
+      }
       const files = req.files["documents"] || [];
       const ocrFiles = req.files["ocrDocuments"] || [];
       const linkedInUrls = req.body.linkedInUrls || [];
