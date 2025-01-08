@@ -26,6 +26,8 @@ const upload = multer({ dest: "uploads/" });
 
 // Serve static files from the React app build directory
 app.use(express.static(path.join(__dirname, "dist")));
+app.use(express.static(path.join(__dirname, "public")));
+
 
 // Create temp directory if it doesn't exist
 const tempDir = path.join(__dirname, "temp");
@@ -55,9 +57,36 @@ const visionClient = new vision.ImageAnnotatorClient({
 
 app.use(express.json());
 
+// Add new helper function for content moderation
+async function moderateContent(text, traceId) {
+  try {
+    const openai = new OpenAI({
+      baseURL: PORTKEY_GATEWAY_URL,
+      defaultHeaders: createHeaders({
+        provider: "openai",
+        apiKey: process.env.PORTKEY_API_KEY,
+        traceId: traceId,
+      }),
+      apiKey: process.env.OPENAI_API_KEY,
+    });
+
+    const moderation = await openai.moderations.create({ input: text });
+    return moderation.results[0];
+  } catch (error) {
+    console.error("Error in content moderation:", error);
+    throw error;
+  }
+}
+
 // Helper function to summarize market opportunity
 async function summarizeMarketOpportunity(text, traceId, spanId) {
   try {
+    // Add moderation check before processing
+    const moderationResult = await moderateContent(text, traceId);
+    if (moderationResult.flagged) {
+      throw new Error("Content flagged by moderation system");
+    }
+
     const openai = new OpenAI({
       baseURL: PORTKEY_GATEWAY_URL,
       defaultHeaders: createHeaders({
@@ -123,12 +152,12 @@ async function runMarketAnalysis(marketOpportunity, traceId) {
 
     pythonProcess.stdout.on("data", (data) => {
       const output = data.toString();
-      console.log("Python script output:", output); // Log all output
+      console.log("Python script output:", output);
       result += output;
     });
 
     pythonProcess.stderr.on("data", (data) => {
-      console.error("Python script error:", data.toString()); // Log any errors
+      console.error("Python script error:", data.toString());
     });
 
     pythonProcess.on("close", (code) => {
@@ -137,7 +166,6 @@ async function runMarketAnalysis(marketOpportunity, traceId) {
         reject(`Python script exited with code ${code}`);
       } else {
         try {
-          // Find the last valid JSON in the output
           const jsonStart = result.lastIndexOf("{");
           const jsonEnd = result.lastIndexOf("}");
           if (jsonStart !== -1 && jsonEnd !== -1 && jsonEnd > jsonStart) {
@@ -206,39 +234,39 @@ async function getLinkedInProfile(url) {
 // Helper function to OCR
 async function processOCRDocuments(files) {
   let extractedText = "";
-
   for (const file of files) {
     if (file.mimetype === "application/pdf") {
       try {
         console.log(`Processing OCR for file: ${file.originalname}`);
-
-        // Read the file content
         const content = await fs.readFile(file.path);
-
-        // Create a request to process the PDF
         const request = {
           requests: [
             {
               inputConfig: {
                 mimeType: "application/pdf",
                 content: content.toString("base64"),
+                pdfOptions: {
+                  pageStart: 1  // Start from first page
+                }
               },
-              features: [{ type: "DOCUMENT_TEXT_DETECTION" }],
+              features: [
+                { type: "TEXT_DETECTION" },  // For images within PDF
+                { type: "DOCUMENT_TEXT_DETECTION" }  // For text-based content
+              ],
             },
           ],
         };
 
-        // Make the request to Google Cloud Vision API
         const [result] = await visionClient.batchAnnotateFiles(request);
-
-        // Extract text from the response
         const pages = result.responses[0].responses;
         for (const page of pages) {
-          if (page.fullTextAnnotation) {
-            extractedText += page.fullTextAnnotation.text + "\n\n";
+          // Prefer TEXT_DETECTION results for better image text extraction
+          const textAnnotation = page.textAnnotations?.[0]?.description || 
+                               page.fullTextAnnotation?.text || '';
+          if (textAnnotation) {
+            extractedText += textAnnotation + "\n\n";
           }
         }
-
         console.log(`Text extracted from file: ${file.originalname}`);
       } catch (error) {
         console.error("Error processing PDF with Google Cloud Vision:", error);
@@ -246,26 +274,39 @@ async function processOCRDocuments(files) {
     } else {
       console.warn(`Unsupported file type for OCR: ${file.mimetype}`);
     }
-    // Clean up uploaded file
     await fs.unlink(file.path);
   }
-
   return extractedText;
-}
+}npm 
 
-// New function to extract content from a URL
+// Helper function to extract content from a URL
 async function extractContentFromUrl(url) {
   try {
     const response = await axios.get(url);
     const $ = cheerio.load(response.data);
 
-    // Remove script and style elements
     $('script, style').remove();
 
-    // Extract text content
     let content = $('body').text();
 
-    // Clean up whitespace
+    content = content.replace(/\s+/g, ' ').trim();
+
+    return content;
+  } catch (error) {
+    console.error("Error extracting content from URL:", error);
+    return "";
+  }
+}
+// Helper function to extract content from a URL
+async function extractContentFromUrl(url) {
+  try {
+    const response = await axios.get(url);
+    const $ = cheerio.load(response.data);
+
+    $('script, style').remove();
+
+    let content = $('body').text();
+
     content = content.replace(/\s+/g, ' ').trim();
 
     return content;
@@ -290,7 +331,7 @@ app.post(
       const currentRound = req.body.currentRound || "";
       const proposedValuation = req.body.proposedValuation || "";
       const valuationDate = req.body.valuationDate || "";
-      const url = req.body.url || ""; 
+      const url = req.body.url || "";
 
       console.log(
         "Received files:",
@@ -304,7 +345,7 @@ app.post(
       console.log("Raising:", currentRound);
       console.log("Post-Money:", proposedValuation);
       console.log("Analysis Date:", valuationDate);
-      console.log("Received URL:", url); // Log the received URL
+      console.log("Received URL:", url);
 
       let extractedText = "";
 
@@ -323,11 +364,22 @@ app.post(
         } else {
           console.warn(`Unsupported file type: ${file.mimetype}`);
         }
-        // Clean up uploaded file
         await fs.unlink(file.path);
       }
 
-      // Process OCR documents only if there are any
+      // Early moderation check after initial document processing
+      if (extractedText) {
+        const initialModerationResult = await moderateContent(extractedText, traceId);
+        if (initialModerationResult.flagged) {
+          return res.status(400).json({
+            error: "Content moderation check failed",
+            details: "The provided content contains inappropriate material that violates our content policy.",
+            categories: initialModerationResult.categories
+          });
+        }
+      }
+
+      // Process OCR documents
       if (ocrFiles.length > 0) {
         const ocrText = await processOCRDocuments(ocrFiles);
         extractedText += ocrText;
@@ -338,6 +390,16 @@ app.post(
         console.log("Extracting content from URL:", url);
         const urlContent = await extractContentFromUrl(url);
         extractedText += "\n\nContent from provided URL:\n" + urlContent;
+      }
+
+      // Final moderation check after all content is combined
+      const finalModerationResult = await moderateContent(extractedText, traceId);
+      if (finalModerationResult.flagged) {
+        return res.status(400).json({
+          error: "Content moderation check failed",
+          details: "The provided content contains inappropriate material that violates our content policy.",
+          categories: finalModerationResult.categories
+        });
       }
 
       console.log("Extracted text length:", extractedText.length);
@@ -372,157 +434,155 @@ app.post(
         }),
       );
 
-      // Combine extracted text from documents and LinkedIn data
-      const combinedText = `
-      Current Deal Terms:
-      Current Funding Round: ${currentRound || "Not provided"}
-      Proposed Valuation: ${proposedValuation || "Not provided"}
-      Analysis Date: ${valuationDate || "Not provided"}
-      Extracted Text from Documents:
-      ${extractedText}
-      Founder Information from LinkedIn:
-      ${founderData.filter((data) => data !== null).join("\n\n")}
-    `;
+      // Combine extracted text
+            const combinedText = `
+              Email: ${req.body.email || "Not provided"}
+              Current Deal Terms:
+              Current Funding Round: ${currentRound || "Not provided"}
+              Proposed Valuation: ${proposedValuation || "Not provided"}
+              Analysis Date: ${valuationDate || "Not provided"}
+              Extracted Text from Documents:
+              ${extractedText}
+              Founder Information from LinkedIn:
+              ${founderData.filter((data) => data !== null).join("\n\n")}
+            `;
 
-      // Summarize market opportunity
-      const marketOpportunitySpanId = crypto.randomUUID();
-      const marketOpportunity = await summarizeMarketOpportunity(extractedText, traceId, marketOpportunitySpanId);
-      console.log("Market opportunity:", marketOpportunity);
+            // Summarize market opportunity
+            const marketOpportunitySpanId = crypto.randomUUID();
+            const marketOpportunity = await summarizeMarketOpportunity(extractedText, traceId, marketOpportunitySpanId);
+            console.log("Market opportunity:", marketOpportunity);
 
-      // Run the market analysis
-      const marketAnalysisResult = await runMarketAnalysis(marketOpportunity, traceId);
-      console.log("Market analysis result:", marketAnalysisResult);
+            // Run the market analysis
+            const marketAnalysisResult = await runMarketAnalysis(marketOpportunity, traceId);
+            console.log("Market analysis result:", marketAnalysisResult);
 
-      // Generate the full memorandum
-      const openai = new OpenAI({
-        baseURL: PORTKEY_GATEWAY_URL,
-        defaultHeaders: createHeaders({
-          provider: "openai",
-          apiKey: process.env.PORTKEY_API_KEY,
-          traceId: traceId,
-        }),
-        apiKey: process.env.OPENAI_API_KEY,
-      });
+            // Generate the full memorandum
+            const openai = new OpenAI({
+              baseURL: PORTKEY_GATEWAY_URL,
+              defaultHeaders: createHeaders({
+                provider: "openai",
+                apiKey: process.env.PORTKEY_API_KEY,
+                traceId: traceId,
+              }),
+              apiKey: process.env.OPENAI_API_KEY,
+            });
 
-      const fullMemoSpanId = crypto.randomUUID();
-      const completion = await openai.chat.completions.create({
-        model: "o1-preview",
-        messages: [
-          {
-            role: "user",
-            content: `
-      You are a top-tier senior venture capitalist with experience in evaluating early-stage startups. Your role is to generate comprehensive investment memorandums based on provided information. Format the output using HTML tags for better readability. Limit yourself to the data given in context and do not make up things or people will get fired. Each section should be detailed and comprehensive, with a particular focus on providing extensive information in the product description section. Generating all required sections of the memo is a must.
+            const fullMemoSpanId = crypto.randomUUID();
+            const completion = await openai.chat.completions.create({
+              model: "o1-preview",
+              messages: [
+                {
+                  role: "user",
+                  content: `
+            You are a top-tier senior venture capitalist with experience in evaluating early-stage startups. Your role is to generate comprehensive investment memorandums based on provided information. Format the output using HTML tags for better readability. Limit yourself to the data given in context and do not make up things or people will get fired. Each section should be detailed and comprehensive, with a particular focus on providing extensive information in the product description section. Generating all required sections of the memo is a must.
 
-      Generate a detailed and comprehensive investment memorandum based on the following information:
+            Generate a detailed and comprehensive investment memorandum based on the following information:
 
-      Market Opportunity: ${marketOpportunity}
+            Market Opportunity: ${marketOpportunity}
 
-      Current Deal Terms:
-      Current Funding Round: ${currentRound || "Not provided"}
-      Proposed Valuation: ${proposedValuation || "Not provided"}
-      Analysis Date: ${valuationDate || "Not provided"}
+            Current Deal Terms:
+            Current Funding Round: ${currentRound || "Not provided"}
+            Proposed Valuation: ${proposedValuation || "Not provided"}
+            Analysis Date: ${valuationDate || "Not provided"}
 
-      Market Analysis Result:
-      Market Sizing Information: ${marketAnalysisResult.market_analysis || "Not available"}
-      Competitor Analysis: ${marketAnalysisResult.competitor_analysis || "Not available"}
+            Market Analysis Result:
+            Market Sizing Information: ${marketAnalysisResult.market_analysis || "Not available"}
+            Competitor Analysis: ${marketAnalysisResult.competitor_analysis || "Not available"}
 
-      Additional Context: ${combinedText}
+            Additional Context: ${combinedText}
 
-      Structure the memo with the following sections, using HTML tags for formatting:
+            Structure the memo with the following sections, using HTML tags for formatting:
 
-      1. <h2>Executive Summary</h2>
-         - Include deal terms and analysis date
-         - Provide a concise summary of the company's offering
-         - Explain why this investment could be attractive for Flybridge. Be specific, highlighting the "why now" and "why this team in this space." Keep this part concise with the main specific points.
+            0. <h2>Generated using Flybridge Memo Generator</h2>
 
-      2. <h2>Market Opportunity and Sizing</h2>
-         - Explain the current unattended area or problems companies face. Mention any tailwinds making this space more attractive at this moment. Keep the "why now" reasons to 2-3 points.
-         - Provide a detailed market sizing calculation using as much data as given in the context. Include:
-           - Total Addressable Market (TAM) and the CAGR or expected growth with reason, making sure you detail to what market you are reffering to 
-           - For each number included (like market size in billions or growth rate), provide details. Also always provide hyperlink to the URL of sources if available 
+            1. <h2>Executive Summary</h2>
+               - Include deal terms and analysis date
+               - Provide a concise summary of the company's offering
+               - Explain why this investment could be attractive for Flybridge. Be specific, highlighting the "why now" and "why this team in this space." Keep this part concise with the main specific points.
 
-      3. <h2>Competitive Landscape</h2>
-         - Analyze competitors, providing descriptions of what they do, any traction, super key to provide total funding when data is available - If not available do not make it up stick with context. 
-         - If you are given the URL of a competitor include it next to the name as hyperlink. Also if you are given any data on their traction, or total capital raised you must include it, same as recent advances
+            2. <h2>Market Opportunity and Sizing</h2>
+               - Explain the current unattended area or problems companies face. Mention any tailwinds making this space more attractive at this moment. Keep the "why now" reasons to 2-3 points.
+               - Provide a detailed market sizing calculation using as much data as given in the context. Include:
+                 - Total Addressable Market (TAM) and the CAGR or expected growth with reason, making sure you detail to what market you are reffering to 
+                 - For each number included (like market size in billions or growth rate), provide details. Also always provide hyperlink to the URL of sources if available 
 
-      4. <h2>Product/Service Description</h2>
-         -- Offer a comprehensive description of the product or services. This section should be very detailed.
-         - Mention what is unique about their approach with good detail.
-         - Explain why it's a good fit for the market.
-         - Provide an in-depth analysis of the AI stack, including:
-           - AI tech strategy and differentiation; be detailed if context is provided.
-           - Include a detailed section on the product roadmap, outlining future products and long-term vision.
-           - Include a section that put's what are going to be the company competitive advantage this section is forward looking, and a a mix of information from input but also thinking through company input what can become in future those competitive advantages.
+            3. <h2>Competitive Landscape</h2>
+               - Analyze competitors, providing descriptions of what they do, any traction, super key to provide total funding when data is available - If not available do not make it up stick with context. 
+               - If you are given the URL of a competitor include it next to the name as hyperlink. Also if you are given any data on their traction, or total capital raised you must include it, same as recent advances
 
-      5. <h2>Business Model</h2>
-         - Describe the company's revenue streams and pricing strategy.
-         - Analyze the scalability and sustainability of the business model.
+            4. <h2>Product/Service Description</h2>
+               -- Offer a comprehensive description of the product or services. This section should be very detailed.
+               - Mention what is unique about their approach with good detail.
+               - Explain why it's a good fit for the market.
+               - Provide an in-depth analysis of the AI stack, including:
+                 - AI tech strategy and differentiation; be detailed if context is provided.
+                 - Include a detailed section on the product roadmap, outlining future products and long-term vision.
+                 - Include a section that put's what are going to be the company competitive advantage this section is forward looking, and a a mix of information from input but also thinking through company input what can become in future those competitive advantages.
 
-      6. <h2>Team</h2>
-         - Use LinkedIn data if available, usually under "Founder Information from LinkedIn."
-         - Must Include hyperlinks to the founders' LinkedIn profiles if provided.
-         - Provide detailed backgrounds and relevant experience of key team members.
-         - Provide background on how they came together and entered this space if context is given.
+            5. <h2>Business Model</h2>
+               - Describe the company's revenue streams and pricing strategy.
+               - Analyze the scalability and sustainability of the business model.
 
-      7. <h2>Go-to-Market Strategy</h2>
-         - Offer a comprehensive description of the company's go-to-market strategy.
-         - Define the Ideal Customer Profile (ICP).
-         - Describe current traction or pilots, if applicable.
-         - Outline the strategy for user acquisition and growth.
-         - Mention milestones the company has for the next round if data is available.
+            6. <h2>Team</h2>
+               - Use LinkedIn data if available, usually under "Founder Information from LinkedIn."
+               - Must Include hyperlinks to the founders' LinkedIn profiles if provided. This is a must for this section in case you were given the Linkedin URL of the founder/founder's
+               - Provide detailed backgrounds and relevant experience of key team members.
+               - Provide background on how they came together and entered this space if context is given.
 
-      8. <h2>Main Risks</h2>
-         - List and analyze the main 4-6 risks that could lead to the startup's failure, being very specific to the business.
+            7. <h2>Go-to-Market Strategy</h2>
+               - Offer a comprehensive description of the company's go-to-market strategy.
+               - Define the Ideal Customer Profile (ICP).
+               - Describe current traction or pilots, if applicable.
+               - Outline the strategy for user acquisition and growth.
+               - Mention milestones the company has for the next round if data is available.
 
-      9. <h2>What Can Go Massively Right</h2>
-         - Provide visionary thinking about the most optimistic scenario for the company's future while keeping realistic expectations. Focus on long-term impact and success, highlighting critical assumptions or market conditions necessary for high success.
+            8. <h2>Main Risks</h2>
+               - List and analyze the main 4-6 risks that could lead to the startup's failure, being very specific to the business.
 
-      10. <h2>Tech Evaluation and Scores</h2>
-          - On a scale of 1 to 10, rate their idea, pitch, and approach, considering factors such as technological differentiation, competition, go-to-market strategy, and traction. Provide reasons for each rating.
-          - Critically analyze and evaluate the technical aspects of AI startup pitches. Identify and critique areas where the pitch may fall short, highlight potential risks, and address challenges in implementation and achievement.
-          - Focus on technical feasibility, accuracy, integration, scalability, and other critical areas relevant to AI technology.
-          - Provide detailed critiques of specific technical areas that may be more challenging than initially expected.
-          - Highlight any technical assumptions that may not hold up in real-world scenarios.
-          - Discuss potential pitfalls in proposed AI models, algorithms, data handling, or infrastructure.
-          - Avoid generic comments; focus on providing deep technical insights with clear explanations and justifications.
+            9. <h2>What Can Go Massively Right</h2>
+               - Provide visionary thinking about the most optimistic scenario for the company's future while keeping realistic expectations. Focus on long-term impact and success, highlighting critical assumptions or market conditions necessary for high success.
 
-        11. <h2>Follow-up- questions</h2>
-          - Generate 4-7 specific follow-up questions to ask the founding team. These questions should address areas where we lack sufficient information or highlight critical risks that could impact the company's success or failure. The questions should be tailored to the specific business, avoiding generic queries, and should help elevate the discussion by diving deeper into the key topics we already have insights on. They should be thoughtful, relevant, and designed to lead to meaningful conversations with the founders.
+            10. <h2>Tech Evaluation and Scores</h2>
+                - On a scale of 1 to 10, rate their idea, pitch, and approach, considering factors such as technological differentiation, competition, go-to-market strategy, and traction. Provide reasons for each rating.
+                - Critically analyze and evaluate the technical aspects of AI startup pitches. Identify and critique areas where the pitch may fall short, highlight potential risks, and address challenges in implementation and achievement.
+                - Focus on technical feasibility, accuracy, integration, scalability, and other critical areas relevant to AI technology.
+                - Provide detailed critiques of specific technical areas that may be more challenging than initially expected.
+                - Highlight any technical assumptions that may not hold up in real-world scenarios.
+                - Discuss potential pitfalls in proposed AI models, algorithms, data handling, or infrastructure.
+                - Avoid generic comments; focus on providing deep technical insights with clear explanations and justifications.
 
-      Use the provided information to create a coherent, comprehensive, and detailed memorandum. Expand on the information provided to create full, informative sections. Ensure the company's solution is positioned within the context of the market opportunity and competitive landscape.
+              11. <h2>Follow-up- questions</h2>
+                - Generate 4-7 specific follow-up questions to ask the founding team. These questions should address areas where we lack sufficient information or highlight critical risks that could impact the company's success or failure. The questions should be tailored to the specific business, avoiding generic queries, and should help elevate the discussion by diving deeper into the key topics we already have insights on. They should be thoughtful, relevant, and designed to lead to meaningful conversations with the founders.`,
+                },
+              ],
+            }, {
+              headers: {
+                'x-portkey-trace-id': traceId,
+                'x-portkey-span-id': fullMemoSpanId,
+                'x-portkey-span-name': 'Generate Full Memorandum'
+              }
+            });
 
-      Use appropriate HTML tags for formatting:
-      - <p> for paragraphs
-      - <ul> and <li> for unordered lists
-      - <ol> and <li> for ordered lists
-      - <strong> for emphasis
-      - <h3> for subsections within main sections
+            const memorandum = completion.choices[0].message.content;
+            console.log("Generated memorandum length:", memorandum.length);
 
-      Avoid adding unnecessary spaces between sections. Focus on providing in-depth analysis and detailed information rather than worrying about the length of the memorandum. If for any given section you don't have context you can say there is not enough context on that specific section.
-            `,
-          },
-        ],
-      }, {
-        headers: {
-          'x-portkey-trace-id': traceId,
-          'x-portkey-span-id': fullMemoSpanId,
-          'x-portkey-span-name': 'Generate Full Memorandum'
-        }
-      });
-
-      const memorandum = completion.choices[0].message.content;
-      console.log("Generated memorandum length:", memorandum.length);
-
-      res.json({ memorandum: memorandum, traceId: traceId });
-    } catch (error) {
-      console.error("Error in /upload route:", error);
-      res.status(500).json({
-        error: "An error occurred while processing your request.",
-        details: error.message,
-      });
-    }
-  },
-);
+            res.json({ memorandum: memorandum, traceId: traceId });
+          } catch (error) {
+            console.error("Error in /upload route:", error);
+            if (error.message === "Content flagged by moderation system") {
+              res.status(400).json({
+                error: "Content moderation check failed",
+                details: "The provided content contains inappropriate material that violates our content policy."
+              });
+            } else {
+              res.status(500).json({
+                error: "An error occurred while processing your request.",
+                details: error.message,
+              });
+            }
+          }
+        },
+      );
 
 // New download endpoint
 app.post("/download", express.json(), async (req, res) => {
@@ -551,44 +611,40 @@ app.post("/download", express.json(), async (req, res) => {
       .json({ error: "An error occurred while generating the Word document." });
   }
 });
+      // Feedback endpoint
+      app.post("/feedback", async (req, res) => {
+        const { traceId, value } = req.body;
 
-// Feedback
-app.post("/feedback", async (req, res) => {
-  const { traceId, value } = req.body;
+        try {
+          await portkey.feedback.create({
+            traceID: traceId,
+            value: value,
+            weight: 1,
+            metadata: {},
+          });
 
-  try {
-    await portkey.feedback.create({
-      traceID: traceId,
-      value: value, // Integer between -10 and 10
-      weight: 1, // Optional
-      metadata: {
-        // You can add additional metadata here if needed
-      },
-    });
+          res.status(200).json({ message: "Feedback submitted successfully" });
+        } catch (error) {
+          console.error("Error submitting feedback:", error);
+          res
+            .status(500)
+            .json({ error: "An error occurred while submitting feedback." });
+        }
+      });
 
-    res.status(200).json({ message: "Feedback submitted successfully" });
-  } catch (error) {
-    console.error("Error submitting feedback:", error);
-    res
-      .status(500)
-      .json({ error: "An error occurred while submitting feedback." });
-  }
-});
+      // Health check route
+      app.get('/health', (req, res) => {
+        res.status(200).send('OK');
+      });
 
-// Add the health check route before your other routes 
-app.get('/health', (req, res) => {
-  res.status(200).send('OK');
-});
+      // Catch-all route to serve the React app
+      app.get("*", (req, res) => {
+        res.sendFile(path.join(__dirname, "dist", "index.html"));
+      });
 
-// Catch-all route to serve the React app
-app.get("*", (req, res) => {
-  res.sendFile(path.join(__dirname, "dist", "index.html"));
-});
-
-// Use the port provided by Replit, or fallback to 3000
-const PORT = process.env.PORT || 3000;
-console.log(`Using port: ${PORT}`);
-app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
-});
-         
+      // Use the port provided by Replit, or fallback to 3000
+      const PORT = process.env.PORT || 3000;
+      console.log(`Using port: ${PORT}`);
+      app.listen(PORT, () => {
+        console.log(`Server is running on port ${PORT}`);
+      });

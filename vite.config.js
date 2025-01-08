@@ -6,4 +6,10 @@ export default defineConfig({
   server: {
     port: 3000,
   },
+  publicDir: 'public',  // This was missing in my previous response
+  build: {
+    outDir: 'dist',
+    assetsDir: 'assets',
+    sourcemap: true,
+  }
 });

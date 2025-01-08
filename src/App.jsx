@@ -1,4 +1,3 @@
-// src/components/App.jsx
 import React, { useState } from "react";
 import axios from "axios";
 
@@ -8,10 +7,13 @@ import FounderInfo from "./components/FounderInfo";
 import MemorandumDisplay from "./components/MemorandumDisplay";
 import LoadingIndicator from "./components/LoadingIndicator";
 import ErrorMessage from "./components/ErrorMessage";
-import UrlInput from "./components/UrlInput"; // New import
+import UrlInput from "./components/UrlInput";
+import CompanyLogo from './components/CompanyLogo';
+import EmailInput from "./components/EmailInput";
 
 function App() {
   // State variables
+  const [email, setEmail] = useState("");
   const [founderCount, setFounderCount] = useState(1);
   const maxFounders = 3;
   const [memorandumContent, setMemorandumContent] = useState("");
@@ -24,22 +26,40 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState("");
   const [error, setError] = useState("");
+  const [moderationDetails, setModerationDetails] = useState(null);
   const [showDownload, setShowDownload] = useState(false);
   const [traceId, setTraceId] = useState("");
   const [showFeedback, setShowFeedback] = useState(false);
   const [feedbackSubmitted, setFeedbackSubmitted] = useState(false);
-  const [url, setUrl] = useState(""); // New state for URL input
+  const [url, setUrl] = useState("");
 
   // Handle form submission
   const handleSubmit = async (e) => {
     e.preventDefault();
 
+    // Check email
+    if (!email) {
+      setError("Please fill in the Email Address.");
+      return;
+    }
+
+    // Check date
     if (!valuationDate) {
       setError("Please fill in the Analysis Date.");
       return;
     }
 
+    // Check documents
+    const hasDocuments = documents && documents.length > 0;
+    const hasOcrDocuments = ocrDocuments && ocrDocuments.length > 0;
+
+    if (!hasDocuments && !hasOcrDocuments) {
+      setError("Please upload at least one document (either regular or OCR document).");
+      return;
+    }
+
     const formData = new FormData();
+    formData.append("email", email);
 
     if (documents) {
       for (let i = 0; i < documents.length; i++) {
@@ -59,12 +79,13 @@ function App() {
     linkedInUrls.forEach((url) => {
       formData.append("linkedInUrls[]", url);
     });
-    formData.append("url", url); // Add URL to form data
+    formData.append("url", url);
 
     setLoading(true);
     setResult("");
     setShowDownload(false);
     setError("");
+    setModerationDetails(null);
     setTraceId("");
     setShowFeedback(false);
     setFeedbackSubmitted(false);
@@ -73,9 +94,11 @@ function App() {
       const response = await axios.post("/upload", formData, {
         headers: { "Content-Type": "multipart/form-data" },
       });
+
       if (response.data.error) {
         throw new Error(response.data.error);
       }
+
       setMemorandumContent(response.data.memorandum);
       setResult(response.data.memorandum);
       setShowDownload(true);
@@ -83,7 +106,16 @@ function App() {
       setShowFeedback(true);
     } catch (error) {
       console.error("Error:", error);
-      setError(`An error occurred: ${error.message}`);
+
+      if (error.response?.data?.error === "Content moderation check failed") {
+        setError(error.response.data.error);
+        setModerationDetails({
+          categories: error.response.data.categories,
+          details: error.response.data.details
+        });
+      } else {
+        setError(error.message || "An unexpected error occurred");
+      }
     } finally {
       setLoading(false);
     }
@@ -166,36 +198,65 @@ function App() {
     <div className="app-container">
       <h1 className="app-title">Flybridge Investment Memorandum Generator</h1>
       <div className="content-wrapper">
+        <CompanyLogo />
         <div className="description">
-          <p>
-            <strong>Flybridge Memo Generator Tool Overview</strong>
+          <br /><br />
+          <p className="intro-text">
+            <strong>
+              Flybridge is an early stage venture capital fund investing in our AI powered future. 
+              If you want to learn more you can visit our{' '}
+              <a 
+                href="https://www.flybridge.com/" 
+                target="_blank" 
+                rel="noopener noreferrer"
+                className="flybridge-link"
+              >
+                website
+              </a>
+              .
+            </strong>
           </p>
           <p>
-            The Flybridge memo generator tool is designed to quickly transform
+            <strong>Tool Overview</strong>
+          </p>
+          <p>
+            The Flybridge memo generator is an AI powered platform designed to quickly transform
             decks, business plans, and call notes into a first-draft VC
             investment memo. For Founders, we hope this will provide insights
             into how a VC firm might look at your business and streamline the
             process of presenting your company to investors by generating a
             draft memorandum based on the provided context. We recommend giving
             the tool as much context as possible to get the most accurate and
-            helpful output. One of the best practices is to record your pitch
-            and upload the transcript along with any supporting materials.
+            helpful output (Limit to o1 context window token limits). One of the best practices is to record your pitch
+            and upload the text transcript along with any supporting materials.
           </p>
           <p>
             <strong>Limitations</strong>
           </p>
           <p>
-            The memo generator provides a solid draft covering an investor’s key
-            considerations. It does have limitations and is a first-step tool
-            that gets you about 60% of the way to a final product, with human
-            input still needed for nuance and judgment. In other words, use the
-            output as a starting point, not a finished memorandum. Also, the
-            tool may reflect biases in the input, and its reasoning is limited
-            by the capabilities of OpenAI’s o1 model. It is meant for
-            informational use only.
+            The memo generator produces a strong initial draft addressing key investor considerations. However, it serves as a starting point rather than a fully polished memorandum, as human input is essential to refine nuance and exercise judgment. Additionally, the tool's reasoning is influenced by the limitations of OpenAI's o1 model and may reflect biases present in the input data. It is intended for informational purposes only. By submitting your data, you acknowledge that it may be reviewed by a Flybridge team member but will not be shared externally.
           </p>
+          <p>
+            <strong>Disclaimer</strong>
+          </p>
+          <p>
+            By submitting your data, you acknowledge that it may be reviewed by a Flybridge team member but will not be shared externally.
+          </p>
+           <br /><br />
+            <p>
+              You can find the Github repo and see source code in this{' '}
+              <a 
+                href="https://github.com/dforwardfeed/memo_generator" 
+                target="_blank" 
+                rel="noopener noreferrer"
+                className="flybridge-link"
+              >
+                link
+              </a>
+            </p>
         </div>
         <form onSubmit={handleSubmit} className="form-container">
+          <EmailInput email={email} setEmail={setEmail} />
           <FileUpload
             documents={documents}
             setDocuments={handleDocumentsChange}
@@ -217,7 +278,7 @@ function App() {
             linkedInUrls={linkedInUrls}
             setLinkedInUrls={setLinkedInUrls}
           />
-          <UrlInput url={url} setUrl={setUrl} /> {/* New UrlInput component */}
+          <UrlInput url={url} setUrl={setUrl} />
           <button type="submit" className="btn btn-primary" disabled={loading}>
             {loading ? "Generating..." : "Generate Memorandum"}
           </button>
@@ -225,7 +286,7 @@ function App() {
 
         {loading && <LoadingIndicator />}
 
-        {error && <ErrorMessage error={error} />}
+        {error && <ErrorMessage error={error} moderationDetails={moderationDetails} />}
 
         {result && (
           <div>
