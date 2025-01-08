@@ -277,7 +277,7 @@ async function processOCRDocuments(files) {
     await fs.unlink(file.path);
   }
   return extractedText;
-}npm 
+}
 
 // Helper function to extract content from a URL
 async function extractContentFromUrl(url) {
