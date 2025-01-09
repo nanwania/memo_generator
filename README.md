@@ -30,6 +30,7 @@ The memo generator produces a strong draft addressing key investor consideration
 - Python (v3.8 or higher)
 - npm (Node Package Manager)
 - pip (Python Package Manager)
+- Google Cloud SDK (for managing Google Cloud resources)
 
 You'll need to set up the following API keys in your environment variables:
 OpenAI API Key
@@ -70,9 +71,25 @@ PROXYCURL_API_KEY=your-proxycurl-api-key
 GOOGLE_APPLICATION_CREDENTIALS=./path-to-your-google-cloud-credentials.json
 PORTKEY_API_KEY=your-portkey-api-key
 PORT=3002
+GOOGLE_CLOUD_PROJECT_ID=flybridgememo-generator
 ```
 
-Set Up Google Cloud Vision API
+### Set Up Google Cloud Vision API
+- Create a Google Cloud Project: Ensure you have a Google Cloud project. If you don't have one, create it in the Google Cloud Console.
+- Enable the Cloud Vision API
+  - Navigate to APIs & Services > Library in the Google Cloud Console.
+  - Search for Cloud Vision API and enable it.
+- Create a Cloud Storage Bucket
+  - Navigate to Cloud Storage > Click Create Bucket and Name the bucket (e.g., memo-generator) -Click Create.
+- Set Up Service Account Permissions
+  - Navigate to IAM & Admin > IAM.
+  - Locate your service account (e.g., your-service-account@your-project-id.iam.gserviceaccount.com).
+  - Click the Edit (pencil) icon next to the service account.
+  - Click Add Another Role and assign the following roles:
+    - Storage Object Admin (roles/storage.objectAdmin)
+    - Storage Object Creator (roles/storage.objectCreator)
+    - Storage Object Viewer (roles/storage.objectViewer)
+    - Cloud Vision AI Service Agent (roles/visionai.serviceAgent)
 - Obtain your Google Cloud Vision API credentials JSON file. Ensure you enable 
 Cloud Vision API
 - Place the JSON file in the root directory of the project under file name: cloud-credentials.json
@@ -107,7 +124,7 @@ npm start
 ## System Diagram
 - Bellow is diagram that explain the components of the application
 ![Structure](image/structure.jpg)
-- See example output memo [Link](https://drive.google.com/file/d/1Lt6d5HiTwAXT0a4cskHhpRcV40FkYvzP/view?usp=sharing)
+- See example output memo [Link](https://docsend.com/view/ke4jyy5yr3y3wmsf)
 
 
 ## License

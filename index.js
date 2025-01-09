@@ -1,4 +1,3 @@
-// index.js
 require("dotenv").config();
 const express = require("express");
 const multer = require("multer");
@@ -18,6 +17,10 @@ const cors = require("cors");
 const crypto = require("crypto");
 const Portkey = require("portkey-ai").default;
 const portkey = new Portkey({ apiKey: process.env.PORTKEY_API_KEY });
+const {Storage} = require('@google-cloud/storage');
+const storage = new Storage({
+  projectId: process.env.GOOGLE_CLOUD_PROJECT_ID
+});
 
 const app = express();
 app.use(cors());
@@ -27,7 +30,6 @@ const upload = multer({ dest: "uploads/" });
 // Serve static files from the React app build directory
 app.use(express.static(path.join(__dirname, "dist")));
 app.use(express.static(path.join(__dirname, "public")));
-
 
 // Create temp directory if it doesn't exist
 const tempDir = path.join(__dirname, "temp");
@@ -231,51 +233,95 @@ async function getLinkedInProfile(url) {
   }
 }
 
-// Helper function to OCR
+// Helper function to process OCR documents using async batch API
 async function processOCRDocuments(files) {
   let extractedText = "";
+  const storage = new Storage();
+  const bucketName = 'memo-generator';
+
   for (const file of files) {
     if (file.mimetype === "application/pdf") {
       try {
         console.log(`Processing OCR for file: ${file.originalname}`);
-        const content = await fs.readFile(file.path);
+
+        // 1. Upload file to Google Cloud Storage
+        const gcsFileName = `temp-uploads/${Date.now()}-${file.originalname}`;
+        const bucket = storage.bucket(bucketName);
+        const blob = bucket.file(gcsFileName);
+
+        // Read file and upload to GCS
+        const fileContent = await fs.readFile(file.path);
+        await blob.save(fileContent);
+
+        // 2. Create async batch request
+        const gcsSourceUri = `gs://${bucketName}/${gcsFileName}`;
+        const gcsDestinationUri = `gs://${bucketName}/ocr-results/${Date.now()}-output-`;
+
         const request = {
-          requests: [
-            {
-              inputConfig: {
-                mimeType: "application/pdf",
-                content: content.toString("base64"),
-                pdfOptions: {
-                  pageStart: 1  // Start from first page
-                }
+          requests: [{
+            inputConfig: {
+              gcsSource: {
+                uri: gcsSourceUri
               },
-              features: [
-                { type: "TEXT_DETECTION" },  // For images within PDF
-                { type: "DOCUMENT_TEXT_DETECTION" }  // For text-based content
-              ],
+              mimeType: "application/pdf"
             },
-          ],
+            features: [{
+              type: "DOCUMENT_TEXT_DETECTION"
+            }],
+            outputConfig: {
+              gcsDestination: {
+                uri: gcsDestinationUri
+              },
+              batchSize: 100  // Process 100 pages per output file
+            }
+          }]
         };
 
-        const [result] = await visionClient.batchAnnotateFiles(request);
-        const pages = result.responses[0].responses;
-        for (const page of pages) {
-          // Prefer TEXT_DETECTION results for better image text extraction
-          const textAnnotation = page.textAnnotations?.[0]?.description || 
-                               page.fullTextAnnotation?.text || '';
-          if (textAnnotation) {
-            extractedText += textAnnotation + "\n\n";
+        // 3. Start async batch operation
+        const [operation] = await visionClient.asyncBatchAnnotateFiles(request);
+        console.log(`Started operation: ${operation.name}`);
+
+        // 4. Wait for the operation to complete
+        const [filesResponse] = await operation.promise();
+
+        // 5. Read results from GCS
+        const outputPrefix = gcsDestinationUri.replace('gs://' + bucketName + '/', '');
+        const [outputFiles] = await bucket.getFiles({ prefix: outputPrefix });
+
+        for (const outputFile of outputFiles) {
+          const [content] = await outputFile.download();
+          const result = JSON.parse(content.toString());
+
+          // Extract text from each response
+          if (result.responses) {
+            for (const response of result.responses) {
+              if (response.fullTextAnnotation) {
+                extractedText += response.fullTextAnnotation.text + "\n\n";
+              }
+            }
           }
         }
-        console.log(`Text extracted from file: ${file.originalname}`);
+
+        // 6. Cleanup: Delete temporary files
+        await blob.delete();
+        for (const outputFile of outputFiles) {
+          await outputFile.delete();
+        }
+
+        console.log(`Successfully processed file: ${file.originalname}`);
       } catch (error) {
         console.error("Error processing PDF with Google Cloud Vision:", error);
+        throw error;  // Re-throw to handle in the upload route
+      } finally {
+        // Clean up the uploaded file from local storage
+        await fs.unlink(file.path);
       }
     } else {
       console.warn(`Unsupported file type for OCR: ${file.mimetype}`);
+      await fs.unlink(file.path);
     }
-    await fs.unlink(file.path);
   }
+
   return extractedText;
 }
 
@@ -297,292 +343,273 @@ async function extractContentFromUrl(url) {
     return "";
   }
 }
-// Helper function to extract content from a URL
-async function extractContentFromUrl(url) {
-  try {
-    const response = await axios.get(url);
-    const $ = cheerio.load(response.data);
-
-    $('script, style').remove();
-
-    let content = $('body').text();
-
-    content = content.replace(/\s+/g, ' ').trim();
-
-    return content;
-  } catch (error) {
-    console.error("Error extracting content from URL:", error);
-    return "";
-  }
-}
 
 // File upload and processing endpoint
-app.post(
-  "/upload",
-  upload.fields([{ name: "documents" }, { name: "ocrDocuments" }]),
-  async (req, res) => {
-    const traceId = crypto.randomUUID();
-    console.log(`Starting memo generation process with trace ID: ${traceId}`);
+app.post("/upload", upload.fields([
+  { name: "documents" }, 
+  { name: "ocrDocuments" }
+]), async (req, res) => {
+  const traceId = crypto.randomUUID();
+  console.log(`Starting memo generation process with trace ID: ${traceId}`);
 
-    try {
-      const files = req.files["documents"] || [];
-      const ocrFiles = req.files["ocrDocuments"] || [];
-      const linkedInUrls = req.body.linkedInUrls || [];
-      const currentRound = req.body.currentRound || "";
-      const proposedValuation = req.body.proposedValuation || "";
-      const valuationDate = req.body.valuationDate || "";
-      const url = req.body.url || "";
+  try {
+    const files = req.files["documents"] || [];
+    const ocrFiles = req.files["ocrDocuments"] || [];
 
-      console.log(
-        "Received files:",
-        files.map((f) => f.originalname),
-      );
-      console.log(
-        "Received OCR files:",
-        ocrFiles.map((f) => f.originalname),
-      );
-      console.log("Received LinkedIn URLs:", linkedInUrls);
-      console.log("Raising:", currentRound);
-      console.log("Post-Money:", proposedValuation);
-      console.log("Analysis Date:", valuationDate);
-      console.log("Received URL:", url);
+    // Extract fields from req.body
+    const {
+      email,
+      currentRound,
+      proposedValuation,
+      valuationDate,
+      url, // Extracting 'url'
+    } = req.body;
 
-      let extractedText = "";
+    // Handle 'linkedInUrls' as an array
+    const linkedInUrls = Array.isArray(req.body.linkedInUrls)
+      ? req.body.linkedInUrls
+      : req.body.linkedInUrls
+        ? [req.body.linkedInUrls]
+        : [];
 
-      // Process regular documents
-      for (const file of files) {
-        const fileBuffer = await fs.readFile(file.path);
-        if (file.mimetype === "application/pdf") {
-          const pdfData = await pdf(fileBuffer);
-          extractedText += pdfData.text + "\n\n";
-        } else if (
-          file.mimetype ===
-          "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        ) {
-          const result = await mammoth.extractRawText({ buffer: fileBuffer });
-          extractedText += result.value + "\n\n";
-        } else {
-          console.warn(`Unsupported file type: ${file.mimetype}`);
-        }
-        await fs.unlink(file.path);
+    console.log("Received data:", {
+      email,
+      currentRound,
+      proposedValuation,
+      valuationDate,
+      url,
+      linkedInUrls,
+    });
+
+    // Process OCR documents first
+    let extractedText = "";
+    if (ocrFiles.length > 0) {
+      console.log(`Processing ${ocrFiles.length} OCR documents`);
+      extractedText = await processOCRDocuments(ocrFiles);
+    }
+
+    // Process regular documents
+    for (const file of files) {
+      const fileBuffer = await fs.readFile(file.path);
+      if (file.mimetype === "application/pdf") {
+        const pdfData = await pdf(fileBuffer);
+        extractedText += pdfData.text + "\n\n";
+      } else if (file.mimetype === "application/vnd.openxmlformats-officedocument.wordprocessingml.document") {
+        const result = await mammoth.extractRawText({ buffer: fileBuffer });
+        extractedText += result.value + "\n\n";
       }
+      await fs.unlink(file.path);
+    }
 
-      // Early moderation check after initial document processing
-      if (extractedText) {
-        const initialModerationResult = await moderateContent(extractedText, traceId);
-        if (initialModerationResult.flagged) {
-          return res.status(400).json({
-            error: "Content moderation check failed",
-            details: "The provided content contains inappropriate material that violates our content policy.",
-            categories: initialModerationResult.categories
-          });
-        }
-      }
-
-      // Process OCR documents
-      if (ocrFiles.length > 0) {
-        const ocrText = await processOCRDocuments(ocrFiles);
-        extractedText += ocrText;
-      }
-
-      // Extract content from URL if provided
-      if (url) {
-        console.log("Extracting content from URL:", url);
-        const urlContent = await extractContentFromUrl(url);
-        extractedText += "\n\nContent from provided URL:\n" + urlContent;
-      }
-
-      // Final moderation check after all content is combined
-      const finalModerationResult = await moderateContent(extractedText, traceId);
-      if (finalModerationResult.flagged) {
+    // Early moderation check after initial document processing
+    if (extractedText) {
+      const initialModerationResult = await moderateContent(extractedText, traceId);
+      if (initialModerationResult.flagged) {
         return res.status(400).json({
           error: "Content moderation check failed",
           details: "The provided content contains inappropriate material that violates our content policy.",
-          categories: finalModerationResult.categories
+          categories: initialModerationResult.categories
         });
       }
+    }
 
-      console.log("Extracted text length:", extractedText.length);
+    // Extract content from URL if provided
+    if (url) { // Now 'url' is defined
+      console.log("Extracting content from URL:", url);
+      const urlContent = await extractContentFromUrl(url);
+      extractedText += "\n\nContent from provided URL:\n" + urlContent;
+    }
 
-      if (extractedText.length === 0) {
-        return res.status(400).json({
-          error: "No text could be extracted from the uploaded files or URL. Please check the inputs and try again.",
-        });
-      }
+    // Final moderation check after all content is combined
+    const finalModerationResult = await moderateContent(extractedText, traceId);
+    if (finalModerationResult.flagged) {
+      return res.status(400).json({
+        error: "Content moderation check failed",
+        details: "The provided content contains inappropriate material that violates our content policy.",
+        categories: finalModerationResult.categories
+      });
+    }
 
-      // Fetch and process LinkedIn data
-      const founderData = await Promise.all(
-        linkedInUrls.map(async (url) => {
-          if (url) {
-            console.log("Processing LinkedIn URL:", url);
-            const profileData = await getLinkedInProfile(url);
-            if (profileData.error) {
-              return `Error fetching founder background: ${profileData.error}`;
-            } else {
-              return `
-            Name: ${profileData.full_name}
-            Current Position: ${profileData.occupation}
-            Summary: ${profileData.summary}
-            Experience: ${profileData.experiences ? profileData.experiences.map((exp) => `${exp.title} at ${exp.company}`).join(", ") : "Not available"}
-            Education: ${profileData.education ? profileData.education.map((edu) => `${edu.degree_name} from ${edu.school}`).join(", ") : "Not available"}
-            Skills: ${profileData.skills ? profileData.skills.join(", ") : "Not available"}
-            LinkedIn URL: ${url}
-          `;
-            }
+    console.log("Extracted text length:", extractedText.length);
+
+    if (extractedText.length === 0) {
+      return res.status(400).json({
+        error: "No text could be extracted from the uploaded files or URL. Please check the inputs and try again.",
+      });
+    }
+
+    // Fetch and process LinkedIn data
+    const founderData = await Promise.all(
+      linkedInUrls.map(async (url) => {
+        if (url) {
+          console.log("Processing LinkedIn URL:", url);
+          const profileData = await getLinkedInProfile(url);
+          if (profileData.error) {
+            return `Error fetching founder background: ${profileData.error}`;
+          } else {
+            return `
+          Name: ${profileData.full_name}
+          Current Position: ${profileData.occupation}
+          Summary: ${profileData.summary}
+          Experience: ${profileData.experiences ? profileData.experiences.map((exp) => `${exp.title} at ${exp.company}`).join(", ") : "Not available"}
+          Education: ${profileData.education ? profileData.education.map((edu) => `${edu.degree_name} from ${edu.school}`).join(", ") : "Not available"}
+          Skills: ${profileData.skills ? profileData.skills.join(", ") : "Not available"}
+          LinkedIn URL: ${url}
+        `;
           }
-          return null;
-        }),
-      );
+        }
+        return null;
+      }),
+    );
 
-      // Combine extracted text
-            const combinedText = `
-              Email: ${req.body.email || "Not provided"}
-              Current Deal Terms:
-              Current Funding Round: ${currentRound || "Not provided"}
-              Proposed Valuation: ${proposedValuation || "Not provided"}
-              Analysis Date: ${valuationDate || "Not provided"}
-              Extracted Text from Documents:
-              ${extractedText}
-              Founder Information from LinkedIn:
-              ${founderData.filter((data) => data !== null).join("\n\n")}
-            `;
+    // Combine extracted text
+    const combinedText = `
+      Email: ${email || "Not provided"}
+      Current Deal Terms:
+      Current Funding Round: ${currentRound || "Not provided"}
+      Proposed Valuation: ${proposedValuation || "Not provided"}
+      Analysis Date: ${valuationDate || "Not provided"}
+      Extracted Text from Documents:
+      ${extractedText}
+      Founder Information from LinkedIn:
+      ${founderData.filter((data) => data !== null).join("\n\n")}
+    `;
 
-            // Summarize market opportunity
-            const marketOpportunitySpanId = crypto.randomUUID();
-            const marketOpportunity = await summarizeMarketOpportunity(extractedText, traceId, marketOpportunitySpanId);
-            console.log("Market opportunity:", marketOpportunity);
+    // Summarize market opportunity
+    const marketOpportunitySpanId = crypto.randomUUID();
+    const marketOpportunity = await summarizeMarketOpportunity(extractedText, traceId, marketOpportunitySpanId);
+    console.log("Market opportunity:", marketOpportunity);
 
-            // Run the market analysis
-            const marketAnalysisResult = await runMarketAnalysis(marketOpportunity, traceId);
-            console.log("Market analysis result:", marketAnalysisResult);
+    // Run the market analysis
+    const marketAnalysisResult = await runMarketAnalysis(marketOpportunity, traceId);
+    console.log("Market analysis result:", marketAnalysisResult);
 
-            // Generate the full memorandum
-            const openai = new OpenAI({
-              baseURL: PORTKEY_GATEWAY_URL,
-              defaultHeaders: createHeaders({
-                provider: "openai",
-                apiKey: process.env.PORTKEY_API_KEY,
-                traceId: traceId,
-              }),
-              apiKey: process.env.OPENAI_API_KEY,
-            });
+    // Generate the full memorandum
+    const openai = new OpenAI({
+      baseURL: PORTKEY_GATEWAY_URL,
+      defaultHeaders: createHeaders({
+        provider: "openai",
+        apiKey: process.env.PORTKEY_API_KEY,
+        traceId: traceId,
+      }),
+      apiKey: process.env.OPENAI_API_KEY,
+    });
 
-            const fullMemoSpanId = crypto.randomUUID();
-            const completion = await openai.chat.completions.create({
-              model: "o1-preview",
-              messages: [
-                {
-                  role: "user",
-                  content: `
-            You are a top-tier senior venture capitalist with experience in evaluating early-stage startups. Your role is to generate comprehensive investment memorandums based on provided information. Format the output using HTML tags for better readability. Limit yourself to the data given in context and do not make up things or people will get fired. Each section should be detailed and comprehensive, with a particular focus on providing extensive information in the product description section. Generating all required sections of the memo is a must.
+    const fullMemoSpanId = crypto.randomUUID();
+    const completion = await openai.chat.completions.create({
+      model: "o1-mini",
+      messages: [
+        {
+          role: "user",
+          content: `
+    You are a top-tier senior venture capitalist with experience in evaluating early-stage startups. Your role is to generate comprehensive investment memorandums based on provided information. Format the output using HTML tags for better readability. Limit yourself to the data given in context and do not make up things or people will get fired. Each section should be detailed and comprehensive, with a particular focus on providing extensive information in the product description section. Generating all required sections of the memo is a must.
 
-            Generate a detailed and comprehensive investment memorandum based on the following information:
+    Generate a detailed and comprehensive investment memorandum based on the following information:
 
-            Market Opportunity: ${marketOpportunity}
+    Market Opportunity: ${marketOpportunity}
 
-            Current Deal Terms:
-            Current Funding Round: ${currentRound || "Not provided"}
-            Proposed Valuation: ${proposedValuation || "Not provided"}
-            Analysis Date: ${valuationDate || "Not provided"}
+    Current Deal Terms:
+    Current Funding Round: ${currentRound || "Not provided"}
+    Proposed Valuation: ${proposedValuation || "Not provided"}
+    Analysis Date: ${valuationDate || "Not provided"}
 
-            Market Analysis Result:
-            Market Sizing Information: ${marketAnalysisResult.market_analysis || "Not available"}
-            Competitor Analysis: ${marketAnalysisResult.competitor_analysis || "Not available"}
+    Market Analysis Result:
+    Market Sizing Information: ${marketAnalysisResult.market_analysis || "Not available"}
+    Competitor Analysis: ${marketAnalysisResult.competitor_analysis || "Not available"}
 
-            Additional Context: ${combinedText}
+    Additional Context: ${combinedText}
 
-            Structure the memo with the following sections, using HTML tags for formatting:
+    Structure the memo with the following sections, using HTML tags for formatting:
 
-            0. <h2>Generated using Flybridge Memo Generator</h2>
+    0. <h2>Generated using Flybridge Memo Generator</h2>
 
-            1. <h2>Executive Summary</h2>
-               - Include deal terms and analysis date
-               - Provide a concise summary of the company's offering
-               - Explain why this investment could be attractive for Flybridge. Be specific, highlighting the "why now" and "why this team in this space." Keep this part concise with the main specific points.
+    1. <h2>Executive Summary</h2>
+       - Include deal terms and analysis date
+       - Provide a concise summary of the company's offering
+       - Explain why this investment could be attractive for Flybridge. Be specific, highlighting the "why now" and "why this team in this space." Keep this part concise with the main specific points.
 
-            2. <h2>Market Opportunity and Sizing</h2>
-               - Explain the current unattended area or problems companies face. Mention any tailwinds making this space more attractive at this moment. Keep the "why now" reasons to 2-3 points.
-               - Provide a detailed market sizing calculation using as much data as given in the context. Include:
-                 - Total Addressable Market (TAM) and the CAGR or expected growth with reason, making sure you detail to what market you are reffering to 
-                 - For each number included (like market size in billions or growth rate), provide details. Also always provide hyperlink to the URL of sources if available 
+    2. <h2>Market Opportunity and Sizing</h2>
+       - Explain the current unattended area or problems companies face. Mention any tailwinds making this space more attractive at this moment. Keep the "why now" reasons to 2-3 points.
+       - Provide a detailed market sizing calculation using as much data as given in the context. Include:
+         - Total Addressable Market (TAM) and the CAGR or expected growth with reason, making sure you detail to what market you are reffering to 
+         - For each number included (like market size in billions or growth rate), provide details. Also always provide hyperlink to the URL of sources if available 
 
-            3. <h2>Competitive Landscape</h2>
-               - Analyze competitors, providing descriptions of what they do, any traction, super key to provide total funding when data is available - If not available do not make it up stick with context. 
-               - If you are given the URL of a competitor include it next to the name as hyperlink. Also if you are given any data on their traction, or total capital raised you must include it, same as recent advances
+    3. <h2>Competitive Landscape</h2>
+       - Analyze competitors, providing descriptions of what they do, any traction, super key to provide total funding when data is available - If not available do not make it up stick with context. 
+       - If you are given the URL of a competitor include it next to the name as hyperlink. Also if you are given any data on their traction, or total capital raised you must include it, same as recent advances
 
-            4. <h2>Product/Service Description</h2>
-               -- Offer a comprehensive description of the product or services. This section should be very detailed.
-               - Mention what is unique about their approach with good detail.
-               - Explain why it's a good fit for the market.
-               - Provide an in-depth analysis of the AI stack, including:
-                 - AI tech strategy and differentiation; be detailed if context is provided.
-                 - Include a detailed section on the product roadmap, outlining future products and long-term vision.
-                 - Include a section that put's what are going to be the company competitive advantage this section is forward looking, and a a mix of information from input but also thinking through company input what can become in future those competitive advantages.
+    4. <h2>Product/Service Description</h2>
+       -- Offer a comprehensive description of the product or services. This section should be very detailed.
+       - Mention what is unique about their approach with good detail.
+       - Explain why it's a good fit for the market.
+       - Provide an in-depth analysis of the AI stack, including:
+         - AI tech strategy and differentiation; be detailed if context is provided.
+         - Include a detailed section on the product roadmap, outlining future products and long-term vision.
+         - Include a section that put's what are going to be the company competitive advantage this section is forward looking, and a a mix of information from input but also thinking through company input what can become in future those competitive advantages.
 
-            5. <h2>Business Model</h2>
-               - Describe the company's revenue streams and pricing strategy.
-               - Analyze the scalability and sustainability of the business model.
+    5. <h2>Business Model</h2>
+       - Describe the company's revenue streams and pricing strategy.
+       - Analyze the scalability and sustainability of the business model.
 
-            6. <h2>Team</h2>
-               - Use LinkedIn data if available, usually under "Founder Information from LinkedIn."
-               - Must Include hyperlinks to the founders' LinkedIn profiles if provided. This is a must for this section in case you were given the Linkedin URL of the founder/founder's
-               - Provide detailed backgrounds and relevant experience of key team members.
-               - Provide background on how they came together and entered this space if context is given.
+    6. <h2>Team</h2>
+       - Use LinkedIn data if available, usually under "Founder Information from LinkedIn."
+       - Must Include hyperlinks to the founders' LinkedIn profiles if provided. This is a must for this section in case you were given the Linkedin URL of the founder/founder's
+       - Provide detailed backgrounds and relevant experience of key team members.
+       - Provide background on how they came together and entered this space if context is given.
 
-            7. <h2>Go-to-Market Strategy</h2>
-               - Offer a comprehensive description of the company's go-to-market strategy.
-               - Define the Ideal Customer Profile (ICP).
-               - Describe current traction or pilots, if applicable.
-               - Outline the strategy for user acquisition and growth.
-               - Mention milestones the company has for the next round if data is available.
+    7. <h2>Go-to-Market Strategy</h2>
+       - Offer a comprehensive description of the company's go-to-market strategy.
+       - Define the Ideal Customer Profile (ICP).
+       - Describe current traction or pilots, if applicable.
+       - Outline the strategy for user acquisition and growth.
+       - Mention milestones the company has for the next round if data is available.
 
-            8. <h2>Main Risks</h2>
-               - List and analyze the main 4-6 risks that could lead to the startup's failure, being very specific to the business.
+    8. <h2>Main Risks</h2>
+       - List and analyze the main 4-6 risks that could lead to the startup's failure, being very specific to the business.
 
-            9. <h2>What Can Go Massively Right</h2>
-               - Provide visionary thinking about the most optimistic scenario for the company's future while keeping realistic expectations. Focus on long-term impact and success, highlighting critical assumptions or market conditions necessary for high success.
+    9. <h2>What Can Go Massively Right</h2>
+       - Provide visionary thinking about the most optimistic scenario for the company's future while keeping realistic expectations. Focus on long-term impact and success, highlighting critical assumptions or market conditions necessary for high success.
 
-            10. <h2>Tech Evaluation and Scores</h2>
-                - On a scale of 1 to 10, rate their idea, pitch, and approach, considering factors such as technological differentiation, competition, go-to-market strategy, and traction. Provide reasons for each rating.
-                - Critically analyze and evaluate the technical aspects of AI startup pitches. Identify and critique areas where the pitch may fall short, highlight potential risks, and address challenges in implementation and achievement.
-                - Focus on technical feasibility, accuracy, integration, scalability, and other critical areas relevant to AI technology.
-                - Provide detailed critiques of specific technical areas that may be more challenging than initially expected.
-                - Highlight any technical assumptions that may not hold up in real-world scenarios.
-                - Discuss potential pitfalls in proposed AI models, algorithms, data handling, or infrastructure.
-                - Avoid generic comments; focus on providing deep technical insights with clear explanations and justifications.
+    10. <h2>Tech Evaluation and Scores</h2>
+        - On a scale of 1 to 10, rate their idea, pitch, and approach, considering factors such as technological differentiation, competition, go-to-market strategy, and traction. Provide reasons for each rating.
+        - Critically analyze and evaluate the technical aspects of AI startup pitches. Identify and critique areas where the pitch may fall short, highlight potential risks, and address challenges in implementation and achievement.
+        - Focus on technical feasibility, accuracy, integration, scalability, and other critical areas relevant to AI technology.
+        - Provide detailed critiques of specific technical areas that may be more challenging than initially expected.
+        - Highlight any technical assumptions that may not hold up in real-world scenarios.
+        - Discuss potential pitfalls in proposed AI models, algorithms, data handling, or infrastructure.
+        - Avoid generic comments; focus on providing deep technical insights with clear explanations and justifications.
 
-              11. <h2>Follow-up- questions</h2>
-                - Generate 4-7 specific follow-up questions to ask the founding team. These questions should address areas where we lack sufficient information or highlight critical risks that could impact the company's success or failure. The questions should be tailored to the specific business, avoiding generic queries, and should help elevate the discussion by diving deeper into the key topics we already have insights on. They should be thoughtful, relevant, and designed to lead to meaningful conversations with the founders.`,
-                },
-              ],
-            }, {
-              headers: {
-                'x-portkey-trace-id': traceId,
-                'x-portkey-span-id': fullMemoSpanId,
-                'x-portkey-span-name': 'Generate Full Memorandum'
-              }
-            });
-
-            const memorandum = completion.choices[0].message.content;
-            console.log("Generated memorandum length:", memorandum.length);
-
-            res.json({ memorandum: memorandum, traceId: traceId });
-          } catch (error) {
-            console.error("Error in /upload route:", error);
-            if (error.message === "Content flagged by moderation system") {
-              res.status(400).json({
-                error: "Content moderation check failed",
-                details: "The provided content contains inappropriate material that violates our content policy."
-              });
-            } else {
-              res.status(500).json({
-                error: "An error occurred while processing your request.",
-                details: error.message,
-              });
-            }
-          }
+      11. <h2>Follow-up- questions</h2>
+        - Generate 4-7 specific follow-up questions to ask the founding team. These questions should address areas where we lack sufficient information or highlight critical risks that could impact the company's success or failure. The questions should be tailored to the specific business, avoiding generic queries, and should help elevate the discussion by diving deeper into the key topics we already have insights on. They should be thoughtful, relevant, and designed to lead to meaningful conversations with the founders.`,
         },
-      );
+      ],
+    }, {
+      headers: {
+        'x-portkey-trace-id': traceId,
+        'x-portkey-span-id': fullMemoSpanId,
+        'x-portkey-span-name': 'Generate Full Memorandum'
+      }
+    });
+
+    const memorandum = completion.choices[0].message.content;
+    console.log("Generated memorandum length:", memorandum.length);
+
+    res.json({ memorandum: memorandum, traceId: traceId });
+  } catch (error) {
+    console.error("Error in /upload route:", error);
+    if (error.message === "Content flagged by moderation system") {
+      res.status(400).json({
+        error: "Content moderation check failed",
+        details: "The provided content contains inappropriate material that violates our content policy."
+      });
+    } else {
+      res.status(500).json({
+        error: "An error occurred while processing your request.",
+        details: error.message,
+      });
+    }
+  }
+});
 
 // New download endpoint
 app.post("/download", express.json(), async (req, res) => {
@@ -611,40 +638,41 @@ app.post("/download", express.json(), async (req, res) => {
       .json({ error: "An error occurred while generating the Word document." });
   }
 });
-      // Feedback endpoint
-      app.post("/feedback", async (req, res) => {
-        const { traceId, value } = req.body;
 
-        try {
-          await portkey.feedback.create({
-            traceID: traceId,
-            value: value,
-            weight: 1,
-            metadata: {},
-          });
+// Feedback endpoint
+app.post("/feedback", async (req, res) => {
+  const { traceId, value } = req.body;
 
-          res.status(200).json({ message: "Feedback submitted successfully" });
-        } catch (error) {
-          console.error("Error submitting feedback:", error);
-          res
-            .status(500)
-            .json({ error: "An error occurred while submitting feedback." });
-        }
-      });
+  try {
+    await portkey.feedback.create({
+      traceID: traceId,
+      value: value,
+      weight: 1,
+      metadata: {},
+    });
 
-      // Health check route
-      app.get('/health', (req, res) => {
-        res.status(200).send('OK');
-      });
+    res.status(200).json({ message: "Feedback submitted successfully" });
+  } catch (error) {
+    console.error("Error submitting feedback:", error);
+    res
+      .status(500)
+      .json({ error: "An error occurred while submitting feedback." });
+  }
+});
 
-      // Catch-all route to serve the React app
-      app.get("*", (req, res) => {
-        res.sendFile(path.join(__dirname, "dist", "index.html"));
-      });
+// Health check route
+app.get('/health', (req, res) => {
+  res.status(200).send('OK');
+});
 
-      // Use the port provided by Replit, or fallback to 3000
-      const PORT = process.env.PORT || 3000;
-      console.log(`Using port: ${PORT}`);
-      app.listen(PORT, () => {
-        console.log(`Server is running on port ${PORT}`);
-      });
+// Catch-all route to serve the React app
+app.get("*", (req, res) => {
+  res.sendFile(path.join(__dirname, "dist", "index.html"));
+});
+
+// Use the port provided by Replit, or fallback to 3000
+const PORT = process.env.PORT || 3000;
+console.log(`Using port: ${PORT}`);
+app.listen(PORT, () => {
+  console.log(`Server is running on port ${PORT}`);
+});

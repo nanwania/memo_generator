@@ -1,8 +1,8 @@
 import React from 'react';
 
 function ErrorMessage({ error }) {
-  // We first create a consistent contact message that we'll use across all error types
-  const contactMessage = "If you continue to experience issues, please email daniel@flybridge.com";
+  // Consistent contact message used across all error types
+  const contactMessage = "If you continue to experience issues, please email daniel@flybridge.com.";
 
   // Handle cases where error is undefined or null
   if (!error) {
@@ -20,7 +20,7 @@ function ErrorMessage({ error }) {
   if (errorString.includes("429") || errorString.toLowerCase().includes("rate limit")) {
     return (
       <div className="error-message">
-        <p>Daily OpenAI credits exceeded, try tomorrow or message daniel@flybridge.com</p>
+        <p>Daily OpenAI credits exceeded, try tomorrow or message daniel@flybridge.com.</p>
       </div>
     );
   }
@@ -30,6 +30,16 @@ function ErrorMessage({ error }) {
     return (
       <div className="error-message">
         <p>Please check your uploaded documents. Either no documents were uploaded or they are in an incorrect format.</p>
+        <p>{contactMessage}</p>
+      </div>
+    );
+  }
+
+  // Handle gateway timeout errors (504)
+  if (errorString.includes("504") || errorString.toLowerCase().includes("gateway timeout")) {
+    return (
+      <div className="error-message">
+        <p>Exceeded limit context. Try again or try uploading a shorter version.</p>
         <p>{contactMessage}</p>
       </div>
     );
