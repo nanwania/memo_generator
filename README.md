@@ -63,7 +63,7 @@ npm run build
 ```
 
 ## Set Up Environment Variables
-Create a .env file in the root directory and add the following environment variables:
+Rename the `.env.example` file to simply `.env` and fill in the below environment variables (see below for instructions):
 ```env
 OPENAI_API_KEY=your-openai-api-key
 EXA_API_KEY==your-exa-api-key
