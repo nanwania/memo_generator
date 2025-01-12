@@ -44,13 +44,13 @@ class CustomEXASearchTool(EXASearchTool):
         super().__init__(
             type='neural',
             use_autoprompt=True,
+            category='company',
             startPublishedDate='2021-10-01T00:00:00.000Z',
-            endPublishedDate='2023-10-31T23:59:59.999Z',
             excludeText=[
                 'OpenAI', 'Anthropic', 'Google', 'Mistral', 'Microsoft', 'Nvidia', 
                 'general AI market', 'overall AI industry', 'IBM', 'Mistral'
             ],
-            numResults=10
+            numResults=20
         )
 
 exa_search_tool = CustomEXASearchTool()

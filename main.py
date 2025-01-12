@@ -35,17 +35,14 @@ def run_analysis(market_opportunity, trace_id):
         1. Identify 3-4 specific AI startup competitors by name. Avoid generic players like OpenAI, Microsoft, Google, Anthropic, Hugging Face in results. Instead, focus on finding real company names of highly relevant players with bespoke competing products and focus.
         2. For each competitor, provide:
            - Company full name and website (if available)
-           - Total funding and capital raised (ensure it's total funding, not just the last round).
-           - Competing product offering.
            - Traction.""",
         expected_output="""A comprehensive competitor analysis including:
         1. Overview of 3-4 main AI startup competitors.
         2. For each competitor:
            - Company name and details
-           - Total funding and capital raised.
-           - Detailed description of competing product offering.
+           - Detailed description of product offering.
            - Current known traction revenue, total customer's
-           - Recent significant developments.""",
+           - Customer traction metrics if available.""",
         agent=competitor_analyst,
         async_execution=True
     )

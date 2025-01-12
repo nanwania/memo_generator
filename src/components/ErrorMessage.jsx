@@ -36,10 +36,12 @@ function ErrorMessage({ error }) {
   }
 
   // Handle gateway timeout errors (504)
-  if (errorString.includes("504") || errorString.toLowerCase().includes("gateway timeout")) {
+  if (errorString.includes("504") || 
+      errorString.toLowerCase().includes("gateway timeout") ||
+      errorString.includes("Request failed with status code 504")) {  // Add this condition
     return (
       <div className="error-message">
-        <p>Exceeded limit context. Try again or try uploading a shorter version.</p>
+        <p>Our system timed out while processing your request, likely due to a temporary issue. A retry often resolves this. If you're analyzing large documents, consider reducing their content.</p>
         <p>{contactMessage}</p>
       </div>
     );

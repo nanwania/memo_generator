@@ -502,7 +502,7 @@ app.post("/upload", upload.fields([
         {
           role: "user",
           content: `
-    You are a top-tier senior venture capitalist with experience in evaluating early-stage startups. Your role is to generate comprehensive investment memorandums based on provided information. Format the output using HTML tags for better readability. Limit yourself to the data given in context and do not make up things or people will get fired. Each section should be detailed and comprehensive, with a particular focus on providing extensive information in the product description section. Generating all required sections of the memo is a must.
+    You are a top-tier senior venture capitalist with experience in evaluating early-stage startups. Your role is to generate comprehensive investment memorandums based on provided information. Format the output using HTML tags for better readability. Limit yourself to the data given in context and do not make up things or people will get fired. Each section should be detailed and comprehensive, with a particular focus on providing extensive information in the product description section. Generating all required sections of the memo is a must. You should approach this with a critical lens, balancing skepticism and insight while recognizing that venture capital focuses on the potential if things go well. For instance, in the diligence section, you could explain the company's go-to-market strategy or product roadmap, but it's perfectly fine to highlight anything unusual or potentially risky.
 
     Generate a detailed and comprehensive investment memorandum based on the following information:
 
@@ -532,11 +532,11 @@ app.post("/upload", upload.fields([
        - Explain the current unattended area or problems companies face. Mention any tailwinds making this space more attractive at this moment. Keep the "why now" reasons to 2-3 points.
        - Provide a detailed market sizing calculation using as much data as given in the context. Include:
          - Total Addressable Market (TAM) and the CAGR or expected growth with reason, making sure you detail to what market you are reffering to 
-         - For each number included (like market size in billions or growth rate), provide details. Also always provide hyperlink to the URL of sources if available 
+         - For each number included (like market size in billions or growth rate), provide details. Also always provide hyperlink to the URL of sources if available. But ensure it is a real URL that is related to the source.  
 
     3. <h2>Competitive Landscape</h2>
-       - Analyze competitors, providing descriptions of what they do, any traction, super key to provide total funding when data is available - If not available do not make it up stick with context. 
-       - If you are given the URL of a competitor include it next to the name as hyperlink. Also if you are given any data on their traction, or total capital raised you must include it, same as recent advances
+       - Analyze competitors, providing detail descriptions of what they do,. 
+       - If you are given the URL of a competitor include it next to the name as hyperlink. Also if you are given any data on their traction, or total capital raised you must include it, same as recent advances, but only if given on the context. 
 
     4. <h2>Product/Service Description</h2>
        -- Offer a comprehensive description of the product or services. This section should be very detailed.
